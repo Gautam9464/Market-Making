@@ -15,4 +15,4 @@ Order book simulation with configurable depth
      Net PnL
 5. Visualization of cumulative PnL over time for selected stock.
 6. Interactive GUI table to browse stock-wise performance (via Tkinter)
-We ran the code for top 50 Indian as well as USA stocks and observed decent performance in both cases
+We ran the code for top 50 Indian as well as USA stocks and observed decent performance in both cases.
