@@ -96,7 +96,7 @@ class MarketMaker:
 
 # ------------------- Simulation Loop -------------------
 def run_simulation(fair_values):
-    mm = MarketMaker(initial_cash=100000, base_spread=1.0)
+    mm = MarketMaker(initial_cash=1000, base_spread=1.0)
     for fair_value in fair_values.tolist():
         ob = OrderBook(center_price=fair_value)
         bid, ask = mm.generate_quotes(fair_value)
@@ -126,7 +126,7 @@ usa50= [
 data = yf.download(usa50, period="3mo", interval="1d")["Close"].dropna(axis=1, how="any")
 
 performance = {}
-example_stocks = ["AAPL", "MSFT", "GOOGL"]
+example_stocks = ["MA", "MSFT", "GOOGL"]
 
 plt.figure(figsize=(12, 6))
 for symbol in data.columns:
@@ -158,7 +158,7 @@ performance_df = pd.DataFrame.from_dict(performance, orient='index', columns=[
 
 performance_df.to_csv("nifty50_simulation_results.csv")
 
-performance_df[['Total PnL']].sort_values('Total PnL').plot(kind='barh', figsize=(10, 12), title='PnL across NIFTY 50 Stocks')
+performance_df[['Total PnL']].sort_values('Total PnL').plot(kind='barh', figsize=(10, 12), title='PnL across USA 50 stocks')
 plt.tight_layout()
 plt.grid()
 plt.show()
@@ -182,4 +182,56 @@ for _, row in performance_df.iterrows():
     tree.insert("", tk.END, values=[f"{v:.2f}" if isinstance(v, float) else v for v in row.values])
 
 root.mainloop()
+# ... [rest of the code remains unchanged above]
+# -------------------- Total Portfolio Management --------------------
+def run_total_portfolio_simulation(data):
+    total_cash = 0
+    total_inventory = {}
+    total_initial_cash = 0
+    portfolio_history = []
+    inventory_snapshot = {}
 
+    for symbol in data.columns:
+        prices = data[symbol].dropna().values
+        mm = run_simulation(prices)
+        final_price = prices[-1]
+
+        total_cash += mm.cash
+        total_initial_cash += mm.initial_cash
+        total_inventory[symbol] = mm.inventory
+        inventory_snapshot[symbol] = mm.inventory * final_price
+
+        if len(portfolio_history) == 0:
+            portfolio_history = mm.pnl_history[:]
+        else:
+            portfolio_history = [sum(x) for x in zip(portfolio_history, mm.pnl_history)]
+
+    portfolio_value = total_cash + sum(inventory_snapshot.values())
+    net_portfolio_pnl = portfolio_value - total_initial_cash
+
+    returns = np.diff(portfolio_history)
+    sharpe_ratio = np.mean(returns) / np.std(returns) * np.sqrt(252) if np.std(returns) > 0 else 0
+    max_drawdown = np.max(np.maximum.accumulate(portfolio_history) - portfolio_history)
+    drawdown_pct = max_drawdown / np.maximum.accumulate(portfolio_history).max() * 100 if np.maximum.accumulate(portfolio_history).max() > 0 else 0
+
+    return portfolio_history, net_portfolio_pnl, sharpe_ratio, drawdown_pct
+
+# Run portfolio simulation
+portfolio_pnl, total_pnl, total_sharpe, total_dd = run_total_portfolio_simulation(data)
+
+# Plot Total Portfolio PnL
+plt.figure(figsize=(10, 5))
+plt.plot(portfolio_pnl, label='Total Portfolio')
+plt.title("Total Portfolio Cumulative PnL")
+plt.xlabel("Time Step (Days)")
+plt.ylabel("PnL (USD)")
+plt.grid()
+plt.legend()
+plt.tight_layout()
+plt.show()
+
+print("\nTotal Portfolio Results")
+print("------------------------")
+print(f"Net Total PnL      : ${total_pnl:.2f}")
+print(f"Sharpe Ratio        : {total_sharpe:.2f}")
+print(f"Max Drawdown (%)    : {total_dd:.2f}%")
