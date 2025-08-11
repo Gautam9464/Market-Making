@@ -121,18 +121,11 @@ def simulate_market_impact(price, size, volatility):
     slippage = price * impact_factor * (size**0.5) * (1 + volatility)
     return slippage
 
-# Add skew & noise so book is not perfectly symmetric
 def update_synthetic_order_book(book, fair_value, spread=0.001, base=100, skew=0.0, noise=0.15):
-    """Create a synthetic book with optional imbalance and randomness.
-    skew in [-1,1]: +ve => bid-heavy, -ve => ask-heavy.
-    noise: std-dev of multiplicative noise on sizes.
-    """
     book.bids.clear()
     book.asks.clear()
     for i in range(1, 6):
-        # size baseline decays with level depth
         base_size = base / i
-        # multiplicative noise, clipped to avoid negatives
         bid_mult = max(0.05, 1 + skew + np.random.normal(0, noise))
         ask_mult = max(0.05, 1 - skew + np.random.normal(0, noise))
         bid_sz = base_size * bid_mult
@@ -140,9 +133,7 @@ def update_synthetic_order_book(book, fair_value, spread=0.001, base=100, skew=0
         book.add_order('buy',  round(fair_value * (1 - spread * i), 2), bid_sz)
         book.add_order('sell', round(fair_value * (1 + spread * i), 2), ask_sz)
 
-# --------- helper: snapshot book (for visuals) ---------
 def snapshot_book(book, levels=5):
-    # Closest-to-mid first
     bids_sorted = sorted(book.bids.items(), key=lambda x: -x[0])[:levels]
     asks_sorted = sorted(book.asks.items(), key=lambda x:  x[0])[:levels]
     bid_prices  = [p for p, _ in bids_sorted]
@@ -166,12 +157,9 @@ def run_simulation(prices_series, base_spread_pct, volatility_window, volatility
     fair_value_series = prices_series.ewm(span=5, adjust=False).mean()
     
     market_order_book = OrderBook()
-
-    # ---- NEW: collections for order book visuals ----
-    ob_best_bids, ob_best_asks = [], []
-    ob_imbalance = []
-    ob_bid_sizes_t, ob_ask_sizes_t = [], []   # list of [size_l1..l5] over time
-    our_bids, our_asks = [], []               # two lists
+    ob_best_bids, ob_best_asks, ob_imbalance = [], [], []
+    ob_bid_sizes_t, ob_ask_sizes_t = [], []
+    our_bids, our_asks = [], []
 
     for i in range(volatility_window, len(fair_value_series)):
         if not mm.is_active:
@@ -182,66 +170,95 @@ def run_simulation(prices_series, base_spread_pct, volatility_window, volatility
         market_price = float(prices_series.iloc[i])
         current_vol = float(rolling_volatility.iloc[i])
         
-        # Derive a persistent skew from recent return and volatility
         ret = float(np.log(prices_series.iloc[i] / prices_series.iloc[i-1])) if i > 0 else 0.0
         skew = np.clip(0.8 * np.tanh(50*current_vol) * np.sign(ret + 1e-12), -0.7, 0.7)
-
-        # Build a noisy, possibly imbalanced book
         update_synthetic_order_book(market_order_book, fair_value, spread=0.001, base=100, skew=skew, noise=0.15)
 
-        # MM generates its quotes based on the market
         bid, ask = mm.generate_quotes(fair_value, current_vol, market_order_book)
         our_bids.append(bid); our_asks.append(ask)
         size = mm.position_size(current_vol, base_trade_size)
 
-        # snapshot book
-        best_bid, best_ask, bid_px, ask_px, bid_sz, ask_sz = snapshot_book(market_order_book, levels=5)
-        # pad/truncate to ensure exactly 5 levels for visuals
-        bid_sz = (bid_sz + [0]*5)[:5]
-        ask_sz = (ask_sz + [0]*5)[:5]
+        best_bid, best_ask, _, _, bid_sz, ask_sz = snapshot_book(market_order_book, levels=5)
         ob_best_bids.append(best_bid); ob_best_asks.append(best_ask)
         bid_depth, ask_depth = market_order_book.get_depth()
         tot = bid_depth + ask_depth
         ob_imbalance.append((bid_depth - ask_depth)/tot if tot > 0 else 0.0)
-        ob_bid_sizes_t.append(bid_sz)  # [L1..L5]
-        ob_ask_sizes_t.append(ask_sz)  # [L1..L5]
+        ob_bid_sizes_t.append((bid_sz + [0]*5)[:5])
+        ob_ask_sizes_t.append((ask_sz + [0]*5)[:5])
 
-        # Simulate a market participant trading against our quotes
         if np.random.random() < trade_probability:
-            if np.random.random() < 0.5: # Someone sells to us (hits our bid)
+            if np.random.random() < 0.5:
                 trade_price = bid
                 price_impact = simulate_market_impact(trade_price, size, current_vol)
                 fair_value_series.iloc[i:] += price_impact
                 mm.execute_trade("buy", trade_price, size)
-                # consume L1 bid depth
-                if best_bid is not None:
-                    market_order_book.remove_order('buy', best_bid, size)
-            else: # Someone buys from us (lifts our ask)
+                if best_bid is not None: market_order_book.remove_order('buy', best_bid, size)
+            else:
                 trade_price = ask
                 price_impact = simulate_market_impact(trade_price, size, current_vol)
                 fair_value_series.iloc[i:] -= price_impact
                 mm.execute_trade("sell", trade_price, size)
-                # consume L1 ask depth
-                if best_ask is not None:
-                    market_order_book.remove_order('sell', best_ask, size)
-                
+                if best_ask is not None: market_order_book.remove_order('sell', best_ask, size)
+        
         mm.record_state(market_price)
     
     if mm.pnl_history:
         mm.pnl_history = [v - mm.pnl_history[0] for v in mm.pnl_history]
 
-    # Package visuals data (purely additive)
     ob_vis = {
-        "best_bid": np.array(ob_best_bids),
-        "best_ask": np.array(ob_best_asks),
-        "imbalance": np.array(ob_imbalance),
-        "bid_sizes": np.array(ob_bid_sizes_t),  # shape: T x 5
-        "ask_sizes": np.array(ob_ask_sizes_t),  # shape: T x 5
-        "our_bid": np.array(our_bids),
-        "our_ask": np.array(our_asks),
-        "offset": volatility_window,
+        "best_bid": np.array(ob_best_bids), "best_ask": np.array(ob_best_asks),
+        "imbalance": np.array(ob_imbalance), "bid_sizes": np.array(ob_bid_sizes_t),
+        "ask_sizes": np.array(ob_ask_sizes_t), "our_bid": np.array(our_bids),
+        "our_ask": np.array(our_asks), "offset": volatility_window,
     }
     return mm, ob_vis
+
+# -------- NEW: Dedicated plotting function ---------
+def plot_stock_charts(symbol, ob_vis):
+    """Generates and shows all charts for a given stock's visualization data."""
+    if not ob_vis or len(ob_vis["best_bid"]) == 0:
+        print(f"No visualization data to plot for {symbol}.")
+        return
+
+    t = np.arange(ob_vis["offset"], ob_vis["offset"] + len(ob_vis["best_bid"]))
+    
+    # 1) Best bid/ask vs our quotes
+    plt.figure(figsize=(11, 4))
+    plt.plot(t, ob_vis["best_bid"], label="Best Bid")
+    plt.plot(t, ob_vis["best_ask"], label="Best Ask")
+    plt.plot(t, ob_vis["our_bid"], label="Our Bid", linestyle="--")
+    plt.plot(t, ob_vis["our_ask"], label="Our Ask", linestyle="--")
+    plt.title(f"{symbol} — Best Bid/Ask vs Our Quotes")
+    plt.xlabel("Time Step (15-min intervals)")
+    plt.ylabel("Price")
+    plt.grid(True); plt.legend(); plt.tight_layout()
+
+    # 2) Imbalance over time
+    plt.figure(figsize=(11, 3))
+    plt.plot(t, ob_vis["imbalance"])
+    plt.title(f"{symbol} — Order Book Imbalance ((BidDepth−AskDepth)/Total)")
+    plt.xlabel("Time Step (15-min intervals)")
+    plt.ylabel("Imbalance")
+    plt.grid(True); plt.tight_layout()
+
+    # 3) Depth heatmaps (sizes at L1..L5 each side)
+    bid_sizes = ob_vis["bid_sizes"]  # T x 5 (L1 near mid)
+    ask_sizes = ob_vis["ask_sizes"]  # T x 5
+    left = bid_sizes[:, ::-1]         # B5..B1
+    right = ask_sizes[:, :]          # A1..A5
+    heat = np.concatenate([left, right], axis=1)  # T x 10
+
+    plt.figure(figsize=(11, 4))
+    plt.imshow(heat.T, aspect='auto', origin='lower', interpolation='nearest')
+    xticks = np.linspace(0, heat.shape[0] - 1, 6, dtype=int)
+    plt.xticks(xticks, (ob_vis["offset"] + xticks))
+    plt.yticks(range(10), [f"B{lvl}" for lvl in range(5, 0, -1)] + [f"A{lvl}" for lvl in range(1, 6)])
+    plt.colorbar(label="Depth (size)")
+    plt.title(f"{symbol} — Order Book Depth Heatmap (Bids L5→L1 | Asks L1→L5)")
+    plt.xlabel("Time Step (15-min intervals)")
+    plt.tight_layout()
+    
+    plt.show() # Display all generated figures
 
 # -------------------- Download and Clean Data --------------------
 nifty50_tickers = [
@@ -265,11 +282,9 @@ data = data.dropna()
 
 # -------------------- Setup and Simulation --------------------
 performance = {}
-example_stocks = ["RELIANCE.NS", "TCS.NS", "TATAMOTORS.NS"]
+all_ob_vis = {} # NEW: Dictionary to store visualization data for all stocks
 portfolio_pnls = []
-
-plt.figure(figsize=(12, 6))
-min_required = 30 
+min_required = 30
 simulated_count = 0
 
 for symbol in data.columns:
@@ -286,13 +301,14 @@ for symbol in data.columns:
         trade_probability=0.4,
         base_trade_size=5
     )
-
+    
     pnl = mm.pnl_history
     if not pnl or len(pnl) < 10:
         continue
 
     simulated_count += 1
     portfolio_pnls.append(pnl)
+    all_ob_vis[symbol] = ob_vis # Store the visualization data for later use
 
     returns = np.diff(pnl)
     sharpe_ratio = np.mean(returns) / np.std(returns) * np.sqrt(252) if np.std(returns) > 0 else 0
@@ -307,59 +323,18 @@ for symbol in data.columns:
     
     performance[symbol] = [symbol, sharpe_ratio, drawdown_pct, turnover, margin_pct, pnl[-1], net_pnl]
 
-    # ---- existing PnL plot for selected stocks ----
-    if symbol in example_stocks:
-    
-
-        # --------- ORDER BOOK VISUALS for this symbol ----------
-        t = np.arange(ob_vis["offset"], ob_vis["offset"] + len(ob_vis["best_bid"]))
-        # 1) Best bid/ask vs our quotes
-        plt.figure(figsize=(11,4))
-        plt.plot(t, ob_vis["best_bid"], label="Best Bid")
-        plt.plot(t, ob_vis["best_ask"], label="Best Ask")
-        plt.plot(t, ob_vis["our_bid"],  label="Our Bid", linestyle="--")
-        plt.plot(t, ob_vis["our_ask"],  label="Our Ask", linestyle="--")
-        plt.title(f"{symbol} — Best Bid/Ask vs Our Quotes")
-        plt.xlabel("Time Step (15-min intervals)")
-        plt.ylabel("Price")
-        plt.grid(True); plt.legend(); plt.tight_layout(); plt.show()
-
-        # 2) Imbalance over time
-        plt.figure(figsize=(11,3))
-        plt.plot(t, ob_vis["imbalance"])
-        plt.title(f"{symbol} — Order Book Imbalance ( (BidDepth−AskDepth)/(Total) )")
-        plt.xlabel("Time Step (15-min intervals)")
-        plt.ylabel("Imbalance")
-        plt.grid(True); plt.tight_layout(); plt.show()
-
-        # 3) Depth heatmaps (sizes at L1..L5 each side)
-        bid_sizes = ob_vis["bid_sizes"]   # T x 5 (L1 near mid)
-        ask_sizes = ob_vis["ask_sizes"]   # T x 5
-        left = bid_sizes[:, ::-1]          # B5..B1
-        right = ask_sizes[:, :]            # A1..A5
-        heat = np.concatenate([left, right], axis=1)  # T x 10
-
-        plt.figure(figsize=(11,4))
-        plt.imshow(heat.T, aspect='auto', origin='lower', interpolation='nearest')
-        xticks = np.linspace(0, heat.shape[0]-1, 6, dtype=int)
-        plt.xticks(xticks, (ob_vis["offset"] + xticks))
-        plt.yticks(range(10), [f"B{lvl}" for lvl in range(5,0,-1)] + [f"A{lvl}" for lvl in range(1,6)])
-        plt.colorbar(label="Depth (size)")
-        plt.title(f"{symbol} — Order Book Depth Heatmap (Bids L5→L1 | Asks L1→L5)")
-        plt.xlabel("Time Step (15-min intervals)")
-        plt.tight_layout(); plt.show()
-
 if simulated_count == 0:
     print("\n[INFO] No stocks met the simulation threshold.")
 else:
     print(f"\n[INFO] Simulated {simulated_count} out of {len(data.columns)} stocks.")
-
 
 # -------------------- Portfolio Aggregation --------------------
 if portfolio_pnls:
     min_len = min(len(p) for p in portfolio_pnls)
     portfolio_pnls_synced = [p[:min_len] for p in portfolio_pnls]
     portfolio_pnl = np.sum(portfolio_pnls_synced, axis=0)
+    
+    # === THIS IS THE RESTORED SECTION ===
     portfolio_returns = np.diff(portfolio_pnl)
     portfolio_returns = 0.5*portfolio_returns
 
@@ -369,45 +344,66 @@ if portfolio_pnls:
     portfolio_dd_pct = portfolio_max_dd / portfolio_peak * 100 if portfolio_peak > 0 else 0
     portfolio_cumulative = portfolio_pnl[-1]
     portfolio_cumulative=portfolio_cumulative-0.7*portfolio_cumulative
-    annualized_return = np.mean(portfolio_returns) * (252 * 16)
-    portfolio_calmar = annualized_return / portfolio_max_dd if portfolio_max_dd > 0 else np.nan
-    portfolio_volatility = np.std(portfolio_returns) * np.sqrt(252 * 16)
-
+    
     print("\n====== Overall Portfolio Performance (Advanced Strategy) ======")
-    print(f"Sharpe Ratio           : {portfolio_sharpe:.4f}")
-    print(f"Max Drawdown (%)       : {portfolio_dd_pct:.2f}%")
-    print(f"Cumulative Return      : {portfolio_cumulative:.2f}")
+    print(f"Sharpe Ratio          : {portfolio_sharpe:.4f}")
+    print(f"Max Drawdown (%)      : {portfolio_dd_pct:.2f}%")
+    print(f"Cumulative Return     : {portfolio_cumulative:.2f}")
+    # =======================================
 
     plt.figure(figsize=(10, 5))
     plt.plot(portfolio_pnl, label='Portfolio PnL', color='green')
     plt.title("Overall Portfolio Cumulative PnL (Advanced Strategy)")
     plt.xlabel("Time Step (15-min intervals)")
     plt.ylabel("PnL")
-    plt.grid(True)
-    plt.legend()
-    plt.tight_layout()
+    plt.grid(True); plt.legend(); plt.tight_layout()
     plt.show()
 
-# -------------------- Save and GUI --------------------
+# -------------------- Save and GUI with Chart Selector --------------------
 if performance:
     performance_df = pd.DataFrame.from_dict(performance, orient='index', columns=[
         'Stock', 'Sharpe Ratio', 'Max Drawdown (%)', 'Turnover', 'Margin Usage (%)', 'Total PnL', 'Net PnL'
     ])
     performance_df.to_csv("nifty50_simulation_results_advanced.csv")
 
-    # GUI Table Output
+    # --- GUI Setup ---
     root = tk.Tk()
-    root.title("Market Making Performance Metrics (Advanced Strategy)")
-    frame = ttk.Frame(root)
-    frame.pack(fill=tk.BOTH, expand=True)
+    root.title("Market Making Performance (Advanced Strategy)")
+    root.geometry("950x600")
+
+    # --- Top frame for controls (selector and button) ---
+    control_frame = ttk.Frame(root, padding="10")
+    control_frame.pack(side=tk.TOP, fill=tk.X)
+
+    ttk.Label(control_frame, text="Select Stock for Detailed Charts:").pack(side=tk.LEFT, padx=(0, 5))
+    
+    simulated_stocks = sorted(list(performance.keys()))
+    stock_selector = ttk.Combobox(control_frame, values=simulated_stocks, state="readonly", width=30)
+    if simulated_stocks:
+        stock_selector.current(0) # Default to the first stock
+    stock_selector.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+    def on_show_charts_click():
+        selected_symbol = stock_selector.get()
+        if selected_symbol in all_ob_vis:
+            plot_stock_charts(selected_symbol, all_ob_vis[selected_symbol])
+        else:
+            print(f"Error: Could not find chart data for {selected_symbol}")
+
+    show_button = ttk.Button(control_frame, text="Show Charts", command=on_show_charts_click)
+    show_button.pack(side=tk.LEFT, padx=(10, 0))
+
+    # --- Main frame for the results table ---
+    table_frame = ttk.Frame(root, padding=(10, 0, 10, 10))
+    table_frame.pack(fill=tk.BOTH, expand=True)
 
     cols = performance_df.columns.tolist()
-    tree = ttk.Treeview(frame, columns=cols, show='headings')
+    tree = ttk.Treeview(table_frame, columns=cols, show='headings')
     for col in cols:
         tree.heading(col, text=col)
         tree.column(col, anchor=tk.CENTER, width=120)
 
-    scrollbar = ttk.Scrollbar(frame, orient="vertical", command=tree.yview)
+    scrollbar = ttk.Scrollbar(table_frame, orient="vertical", command=tree.yview)
     tree.configure(yscrollcommand=scrollbar.set)
     scrollbar.pack(side='right', fill='y')
     tree.pack(fill=tk.BOTH, expand=True)
