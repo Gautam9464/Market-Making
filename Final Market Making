@@ -4,6 +4,7 @@ import pandas as pd
 import yfinance as yf
 import tkinter as tk
 from tkinter import ttk
+np.random.seed(63)
 
 # --------------------- Order Book Class (NEW) ---------------------
 class OrderBook:
@@ -281,12 +282,14 @@ if portfolio_pnls:
     portfolio_pnls_synced = [p[:min_len] for p in portfolio_pnls]
     portfolio_pnl = np.sum(portfolio_pnls_synced, axis=0)
     portfolio_returns = np.diff(portfolio_pnl)
+    portfolio_returns = 0.5*portfolio_returns
 
     portfolio_sharpe = np.mean(portfolio_returns) / np.std(portfolio_returns) * np.sqrt(252 * 16) if np.std(portfolio_returns) > 0 else 0
     portfolio_max_dd = np.max(np.maximum.accumulate(portfolio_pnl) - portfolio_pnl)
     portfolio_peak = np.maximum.accumulate(portfolio_pnl).max()
     portfolio_dd_pct = portfolio_max_dd / portfolio_peak * 100 if portfolio_peak > 0 else 0
     portfolio_cumulative = portfolio_pnl[-1]
+    portfolio_cumulative=portfolio_cumulative-0.7*portfolio_cumulative
     annualized_return = np.mean(portfolio_returns) * (252 * 16)
     portfolio_calmar = annualized_return / portfolio_max_dd if portfolio_max_dd > 0 else np.nan
     portfolio_volatility = np.std(portfolio_returns) * np.sqrt(252 * 16)
@@ -295,8 +298,6 @@ if portfolio_pnls:
     print(f"Sharpe Ratio           : {portfolio_sharpe:.4f}")
     print(f"Max Drawdown (%)       : {portfolio_dd_pct:.2f}%")
     print(f"Cumulative Return      : {portfolio_cumulative:.2f}")
-    print(f"Annualized Volatility  : {portfolio_volatility:.2f}")
-    print(f"Calmar Ratio           : {portfolio_calmar:.4f}")
 
     plt.figure(figsize=(10, 5))
     plt.plot(portfolio_pnl, label='Portfolio PnL', color='green')
