@@ -1,0 +1,250 @@
+import numpy as np
+import matplotlib.pyplot as plt
+import pandas as pd
+import yfinance as yf
+import tkinter as tk
+from tkinter import ttk
+
+# --------------------- Market Maker Class ---------------------
+class MarketMaker:
+    def __init__(self, initial_cash, base_spread_pct=0.001, volatility_multiplier=2.0, max_inventory=20):
+        self.initial_cash = initial_cash
+        self.cash = initial_cash
+        self.inventory = 0
+        self.base_spread_pct = base_spread_pct
+        self.volatility_multiplier = volatility_multiplier
+        self.max_inventory = max_inventory
+        self.trade_history = []
+        self.quotes = []
+        self.pnl_history = []
+        self.inventory_history = []
+        self.cash_history = []
+
+    def generate_quotes(self, fair_value, current_volatility):
+        fair_value = float(fair_value)
+        volatility_component = current_volatility * self.volatility_multiplier
+        total_spread_pct = self.base_spread_pct + volatility_component
+        spread_amount = fair_value * total_spread_pct
+        inventory_skew = (self.inventory / self.max_inventory) * spread_amount
+        
+        bid = fair_value - spread_amount - inventory_skew
+        ask = fair_value + spread_amount - inventory_skew
+        
+        self.quotes.append((round(bid, 2), round(ask, 2)))
+        return round(bid, 2), round(ask, 2)
+
+    def position_size(self):
+        return 1
+
+    def execute_trade(self, side, price, size):
+        if side == "buy" and self.inventory + size > self.max_inventory:
+            return
+        if side == "sell" and self.inventory - size < -self.max_inventory:
+            return
+
+        if side == "buy":
+            cost = price * size
+            if self.cash >= cost:
+                self.cash -= cost
+                self.inventory += size
+                self.trade_history.append(("BUY", price, size))
+        elif side == "sell":
+            proceeds = price * size
+            self.cash += proceeds
+            self.inventory -= size
+            self.trade_history.append(("SELL", price, size))
+
+    def record_state(self, fair_value):
+        self.cash_history.append(self.cash)
+        self.inventory_history.append(self.inventory)
+        realized = self.cash - self.initial_cash
+        unrealized = self.inventory * float(fair_value)
+        self.pnl_history.append(realized + unrealized)
+
+# ------------------- Simulation Loop -------------------
+def run_simulation(prices_series, base_spread_pct, volatility_window, volatility_multiplier, trade_probability):
+    mm = MarketMaker(
+        initial_cash=200000,
+        base_spread_pct=base_spread_pct, 
+        volatility_multiplier=volatility_multiplier
+    )
+    
+    log_returns = np.log(prices_series / pd.Series(prices_series).shift(1))
+    rolling_volatility = log_returns.rolling(window=volatility_window).std().fillna(0)
+    
+    fair_values = prices_series.tolist()
+
+    for i in range(volatility_window, len(fair_values)):
+        fair_value = fair_values[i]
+        current_vol = rolling_volatility.iloc[i]
+        bid, ask = mm.generate_quotes(fair_value, current_vol)
+        size = mm.position_size()
+
+        if np.random.random() < trade_probability:
+            if np.random.random() < 0.5:
+                mm.execute_trade("sell", ask, size)
+            else:
+                mm.execute_trade("buy", bid, size)
+        
+        mm.record_state(fair_value)
+    
+    if mm.pnl_history:
+        mm.pnl_history = [v - mm.pnl_history[0] for v in mm.pnl_history]
+    return mm
+
+# -------------------- Download and Clean Data --------------------
+nifty50_tickers = [
+    "RELIANCE.NS", "TCS.NS", "INFY.NS", "HDFCBANK.NS", "ICICIBANK.NS", "HINDUNILVR.NS",
+    "SBIN.NS", "BHARTIARTL.NS", "ITC.NS", "KOTAKBANK.NS", "BAJFINANCE.NS", "HCLTECH.NS",
+    "ASIANPAINT.NS", "LT.NS", "AXISBANK.NS", "MARUTI.NS", "SUNPHARMA.NS", "TITAN.NS",
+    "ULTRACEMCO.NS", "NESTLEIND.NS", "WIPRO.NS", "TECHM.NS", "HDFCLIFE.NS", "BAJAJFINSV.NS",
+    "POWERGRID.NS", "NTPC.NS", "JSWSTEEL.NS", "TATAMOTORS.NS", "ADANIENT.NS", "ADANIPORTS.NS",
+    "COALINDIA.NS", "GRASIM.NS", "TATASTEEL.NS", "ONGC.NS", "BPCL.NS", "EICHERMOT.NS",
+    "BRITANNIA.NS", "SHREECEM.NS", "CIPLA.NS", "DIVISLAB.NS", "HINDALCO.NS", "BAJAJ-AUTO.NS",
+    "INDUSINDBK.NS", "HDFCAMC.NS", "SBILIFE.NS", "UPL.NS", "DRREDDY.NS", "M&M.NS",
+    "HEROMOTOCO.NS", "APOLLOHOSP.NS"
+]
+
+print("Downloading data...")
+data = yf.download(nifty50_tickers, period="5d", interval="15m")["Close"]
+
+# Optional: resample (can be skipped if not needed)
+# data = data.resample("1h").mean()  # If used, ensure '1h' not '1H'
+
+# Fill small gaps to keep more stocks
+data = data.ffill().bfill()
+
+# Drop stocks with too many NaNs
+threshold = int(0.2 * len(data))
+data = data.dropna(thresh=len(data) - threshold, axis=1)
+data = data.dropna()
+
+# -------------------- Setup and Simulation --------------------
+performance = {}
+example_stocks = ["RELIANCE.NS", "TCS.NS", "TATAMOTORS.NS"]
+portfolio_pnls = []
+
+plt.figure(figsize=(12, 6))
+min_required = 30  # minimum points required per stock
+
+simulated_count = 0
+for symbol in data.columns:
+    series = data[symbol].dropna()
+    if len(series) < min_required:
+        print(f"Skipping {symbol} due to insufficient data ({len(series)} points)")
+        continue
+
+    mm = run_simulation(
+        prices_series=series.values,
+        base_spread_pct=0.001,
+        volatility_window=20,
+        volatility_multiplier=2.0,
+        trade_probability=0.3
+    )
+
+    pnl = mm.pnl_history
+    if not pnl or len(pnl) < 10:
+        continue
+
+    simulated_count += 1
+    portfolio_pnls.append(pnl)
+
+    returns = np.diff(pnl)
+    sharpe_ratio = np.mean(returns) / np.std(returns) * np.sqrt(252) if np.std(returns) > 0 else 0
+    cumulative_pnl = np.array(pnl)
+    max_drawdown = np.max(np.maximum.accumulate(cumulative_pnl) - cumulative_pnl)
+    peak = np.maximum.accumulate(cumulative_pnl).max()
+    drawdown_pct = max_drawdown / peak * 100 if peak > 0 else 0
+    turnover = len(mm.trade_history)
+    avg_inventory = np.mean(np.abs(mm.inventory_history))
+    margin_pct = avg_inventory / mm.max_inventory * 100
+    net_pnl = mm.cash + mm.inventory * series.iloc[-1] - mm.initial_cash
+
+    performance[symbol] = [symbol, sharpe_ratio, drawdown_pct, turnover, margin_pct, pnl[-1], net_pnl]
+
+    if symbol in example_stocks:
+        plt.plot(pnl, label=symbol)
+
+if simulated_count == 0:
+    print("[no] No stocks met the simulation threshold.")
+else:
+    print(f"[OK] Simulated {simulated_count} out of {len(data.columns)} stocks.")
+
+plt.title("Cumulative PnL Over Time (Selected Stocks)")
+plt.xlabel("Time Step")
+plt.ylabel("PnL")
+plt.legend()
+plt.grid(True)
+plt.tight_layout()
+plt.show()
+
+# -------------------- Portfolio Aggregation --------------------
+if portfolio_pnls:
+    min_len = min(len(p) for p in portfolio_pnls)
+    portfolio_pnls_synced = [p[:min_len] for p in portfolio_pnls]
+    portfolio_pnl = np.sum(portfolio_pnls_synced, axis=0)
+    portfolio_returns = np.diff(portfolio_pnl)
+
+    portfolio_sharpe = np.mean(portfolio_returns) / np.std(portfolio_returns) * np.sqrt(252) if np.std(portfolio_returns) > 0 else 0
+    portfolio_max_dd = np.max(np.maximum.accumulate(portfolio_pnl) - portfolio_pnl)
+    portfolio_peak = np.maximum.accumulate(portfolio_pnl).max()
+    portfolio_dd_pct = portfolio_max_dd / portfolio_peak * 100 if portfolio_peak > 0 else 0
+    portfolio_cumulative = portfolio_pnl[-1]
+    portfolio_calmar = (portfolio_pnl[-1] / min_len) / portfolio_max_dd if portfolio_max_dd > 0 else np.nan
+    portfolio_volatility = np.std(portfolio_returns) * np.sqrt(252)
+
+    print("\n====== Overall Portfolio Performance ======")
+    print(f"Sharpe Ratio           : {portfolio_sharpe:.4f}")
+    print(f"Max Drawdown (%)       : {portfolio_dd_pct:.2f}")
+    print(f"Cumulative Return      : {portfolio_cumulative:.2f}")
+    print(f"Annualized Volatility  : {portfolio_volatility:.2f}")
+    print(f"Calmar Ratio           : {portfolio_calmar:.4f}")
+
+    plt.figure(figsize=(10, 5))
+    plt.plot(portfolio_pnl, label='Portfolio PnL', color='green')
+    plt.title("Overall Portfolio Cumulative PnL")
+    plt.xlabel("Time Step")
+    plt.ylabel("PnL")
+    plt.grid(True)
+    plt.legend()
+    plt.tight_layout()
+    plt.show()
+
+# -------------------- Save and GUI --------------------
+if performance:
+    performance_df = pd.DataFrame.from_dict(performance, orient='index', columns=[
+        'Stock', 'Sharpe Ratio', 'Max Drawdown (%)', 'Turnover', 'Margin Usage (%)', 'Total PnL', 'Net PnL'
+    ])
+    performance_df.to_csv("nifty50_simulation_results_updated.csv")
+
+    performance_df[['Total PnL']].sort_values('Total PnL').plot(kind='barh', figsize=(10, 12), title='PnL across NIFTY 50 Stocks')
+    plt.xlabel("Total PnL")
+    plt.tight_layout()
+    plt.grid(True)
+    plt.show()
+
+    # GUI Table Output
+    root = tk.Tk()
+    root.title("Market Making Performance Metrics (Updated Strategy)")
+
+    frame = ttk.Frame(root)
+    frame.pack(fill=tk.BOTH, expand=True)
+
+    cols = performance_df.columns.tolist()
+    tree = ttk.Treeview(frame, columns=cols, show='headings')
+    for col in cols:
+        tree.heading(col, text=col)
+        tree.column(col, anchor=tk.CENTER, width=120)
+
+    # Scrollbar
+    scrollbar = ttk.Scrollbar(frame, orient="vertical", command=tree.yview)
+    tree.configure(yscrollcommand=scrollbar.set)
+    scrollbar.pack(side='right', fill='y')
+    tree.pack(fill=tk.BOTH, expand=True)
+
+    # Sort and insert rows
+    performance_df_sorted = performance_df.sort_values('Sharpe Ratio', ascending=False)
+    for _, row in performance_df_sorted.iterrows():
+        tree.insert("", tk.END, values=[f"{v:.2f}" if isinstance(v, (float, np.floating)) else v for v in row.values])
+
+    root.mainloop()
